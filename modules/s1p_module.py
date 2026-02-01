@@ -1,253 +1,373 @@
 # -*- coding: utf-8 -*-
 import math
+import os
 import tkinter as tk
 import tkinter.ttk as ttk
-from tkinter import filedialog, messagebox, simpledialog
-from pathlib import Path
+from tkinter import filedialog, messagebox
+
 from core.utils import tb, MATPLOTLIB_OK
 from core.base_module import CalcModule
 
 if MATPLOTLIB_OK:
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-    try: import numpy as np
-    except: np = None
+    from matplotlib.ticker import MultipleLocator
 
 class S1PVSWRModule(CalcModule):
-    key = "s1p_vswr"
-    title = "S1P Viewer (КСВН/Z/S11)"
+    key = "s1p"
+    title = "Анализ согласования (S1P)"  # Научное название
 
     def __init__(self, app):
         super().__init__(app)
-        self.file_path = None
-        self.var_path = tk.StringVar(value="Файл не выбран")
-        self.var_quantity = tk.StringVar(value="КСВН (VSWR)")
-        self.var_x_unit = tk.StringVar(value="МГц")
+        # --- Переменные данных ---
+        self.file_path = ""
+        self.raw_data_freq = [] 
+        self.raw_data_s11 = []  
+        
+        # --- UI Переменные ---
+        self.var_file = tk.StringVar(value="Файл не выбран")
+        self.var_type = tk.StringVar(value="КСВН (VSWR)")
+        self.var_f_unit = tk.StringVar(value="МГц")
         self.var_threshold = tk.StringVar(value="2.0")
-        self.var_show_grid = tk.BooleanVar(value=True)
-        self.var_cursor_mode = tk.BooleanVar(value=False)
-        self.data_f_hz, self.data_s11 = [], []
+        
+        # Настройки осей
+        self.var_f_start = tk.StringVar()
+        self.var_f_end = tk.StringVar()
+        self.var_step_x = tk.StringVar(value="100") 
+        
+        self.var_y_min = tk.StringVar(value="1.0")
+        self.var_y_max = tk.StringVar(value="5.0")
+        self.var_step_y = tk.StringVar(value="0.5")   
+
+        self.var_markers = tk.BooleanVar(value=True)
+
         self.fig, self.ax, self.canvas = None, None, None
-        self._markers = []
+        self._markers_list = []
 
     def toolbar_actions(self):
-        return [
-            ("Загрузить .s1p", "secondary", self.load_s1p),
-            ("Автофокус", "success", self.auto_focus),
-            ("Сброс зума", "info", self.reset_zoom),
-            ("Открыть в окне", "light", self.open_detached),
-        ]
+        # Кнопку убрали, так как есть "Обзор" в боковой панели
+        return []
 
     def build_ui(self, parent):
         self.frame = tb.Frame(parent)
         pad = 10
+        
         paned = ttk.PanedWindow(self.frame, orient='horizontal')
         paned.pack(fill='both', expand=True)
         
         left = tb.Frame(paned, padding=pad)
         right = tb.Frame(paned, padding=pad)
-        paned.add(left, weight=0); paned.add(right, weight=1)
+        
+        paned.add(left, weight=0) 
+        paned.add(right, weight=1) 
 
-        box_file = tb.Labelframe(left, text="Файл", padding=10)
-        box_file.pack(fill="x", pady=(0, 10))
-        tb.Button(box_file, text="Обзор...", command=self.load_s1p).pack(fill="x", pady=5)
-        tb.Label(box_file, textvariable=self.var_path, wraplength=280).pack(anchor="w")
+        # --- ЛЕВАЯ ПАНЕЛЬ: ИСТОЧНИК ---
+        lc = tb.Labelframe(left, text="Источник данных", padding=pad)
+        lc.pack(fill="x", pady=(0, pad))
+        
+        tb.Label(lc, textvariable=self.var_file, bootstyle="secondary", wraplength=200).pack(fill="x", pady=(0, 5))
+        tb.Button(lc, text="Обзор...", command=self.select_file, bootstyle="secondary-outline").pack(fill="x")
 
-        box_set = tb.Labelframe(left, text="Параметры", padding=10)
-        box_set.pack(fill="x", pady=(0, 10))
+        # --- ЛЕВАЯ ПАНЕЛЬ: ПАРАМЕТРЫ ---
+        pc = tb.Labelframe(left, text="Параметры", padding=pad)
+        pc.pack(fill="x", pady=(0, pad))
         
-        tb.Label(box_set, text="Тип данных:").pack(anchor="w")
-        vals = ["КСВН (VSWR)", "|S11| (lin)", "S11 (dB)", "Return Loss (dB)", "Фаза (deg)", "Z Active (R)", "Z Reactive (X)"]
-        cb = tb.Combobox(box_set, textvariable=self.var_quantity, values=vals, state="readonly")
-        cb.pack(fill="x", pady=5)
-        cb.bind("<<ComboboxSelected>>", lambda e: self.build_plot(auto_scale=True))
+        def add_combo(parent_fr, label, var, values):
+            tb.Label(parent_fr, text=label, font=("Segoe UI", 9)).pack(anchor="w", pady=(5,0))
+            cb = tb.Combobox(parent_fr, textvariable=var, values=values, state="readonly", font=("Segoe UI", 9))
+            cb.pack(fill="x", pady=(0,5))
+            cb.bind("<<ComboboxSelected>>", lambda e: self.update_plot())
+
+        add_combo(pc, "Тип данных:", self.var_type, ["КСВН (VSWR)", "S11 (дБ)"])
+        add_combo(pc, "Единицы частоты:", self.var_f_unit, ["Гц", "кГц", "МГц", "ГГц"])
         
-        tb.Label(box_set, text="Единицы частоты:").pack(anchor="w")
-        # Расширенный выбор единиц
-        cb_f = tb.Combobox(box_set, textvariable=self.var_x_unit, values=["Гц", "кГц", "МГц", "ГГц"], state="readonly")
-        cb_f.pack(fill="x", pady=5)
-        cb_f.bind("<<ComboboxSelected>>", lambda e: self.build_plot(auto_scale=True))
+        tb.Label(pc, text="Порог (VSWR):", font=("Segoe UI", 9)).pack(anchor="w", pady=(5,0))
+        tb.Entry(pc, textvariable=self.var_threshold).pack(fill="x", pady=(0,5))
+
+        # --- ЛЕВАЯ ПАНЕЛЬ: УПРАВЛЕНИЕ ГРАФИКОМ ---
+        ac = tb.Labelframe(left, text="Управление графиком", padding=pad)
+        ac.pack(fill="x", pady=(0, pad))
         
-        tb.Label(box_set, text="Порог:").pack(anchor="w")
-        tb.Entry(box_set, textvariable=self.var_threshold).pack(fill="x", pady=5)
-        tb.Checkbutton(box_set, text="Сетка", variable=self.var_show_grid, command=self.refresh_plot).pack(anchor="w")
+        def add_axis_row(parent_fr, txt, var):
+            f = tb.Frame(parent_fr)
+            f.pack(fill="x", pady=2)
+            tb.Label(f, text=txt, width=12, font=("Segoe UI", 9)).pack(side="left")
+            tb.Entry(f, textvariable=var, font=("Segoe UI", 9)).pack(side="right", expand=True, fill="x")
+
+        add_axis_row(ac, "F min:", self.var_f_start)
+        add_axis_row(ac, "F max:", self.var_f_end)
+        add_axis_row(ac, "Шаг X:", self.var_step_x)
+        tb.Separator(ac).pack(fill="x", pady=8)
+        add_axis_row(ac, "Y min:", self.var_y_min)
+        add_axis_row(ac, "Y max:", self.var_y_max)
+        add_axis_row(ac, "Шаг Y:", self.var_step_y)
+
+        tb.Checkbutton(ac, text="Маркеры (ЛКМ)", variable=self.var_markers).pack(anchor="w", pady=(10, 5))
         
-        box_tools = tb.Labelframe(left, text="Курсор", padding=10)
-        box_tools.pack(fill="x")
-        tb.Checkbutton(box_tools, text="Ставить ЛКМ", variable=self.var_cursor_mode).pack(anchor="w")
-        tb.Button(box_tools, text="Очистить", command=self.clear_markers, bootstyle="danger-link").pack(anchor="w")
+        # Кнопки действий
+        btn_frame = tb.Frame(ac)
+        btn_frame.pack(fill="x", pady=(10, 0))
+        
+        tb.Button(btn_frame, text="Автомасштаб", command=self.autofocus, bootstyle="info").pack(fill="x", pady=2)
+        tb.Button(btn_frame, text="Обновить график", command=self.update_plot, bootstyle="success").pack(fill="x", pady=2)
+        tb.Button(btn_frame, text="Очистить маркеры", command=self.clear_markers, bootstyle="danger-outline").pack(fill="x", pady=2)
+
+        # --- ПРАВАЯ ПАНЕЛЬ: ГРАФИК ---
+        plot_cont = tb.Frame(right)
+        plot_cont.pack(fill="both", expand=True)
 
         if MATPLOTLIB_OK:
             self.fig = Figure(dpi=100)
             self.ax = self.fig.add_subplot(111)
-            # Отступы
-            self.fig.subplots_adjust(left=0.12, bottom=0.12, right=0.96, top=0.93)
-            self.canvas = FigureCanvasTkAgg(self.fig, master=right)
+            # Убираем ручной adjust, полагаемся на tight_layout в конце
+            
+            self.canvas = FigureCanvasTkAgg(self.fig, master=plot_cont)
             self.canvas.get_tk_widget().pack(fill="both", expand=True)
-            self.toolbar = NavigationToolbar2Tk(self.canvas, right)
+            
+            self.toolbar = NavigationToolbar2Tk(self.canvas, plot_cont)
             self.toolbar.update()
+            
             self.canvas.mpl_connect("button_press_event", self.on_click)
-        else: tb.Label(right, text="No Matplotlib").pack()
+        else:
+            tb.Label(plot_cont, text="Matplotlib не установлен").pack()
+
         return self.frame
 
-    def _parse_s1p(self, path):
-        mul = {"HZ":1, "KHZ":1e3, "MHZ":1e6, "GHZ":1e9}
-        unit, fmt = "HZ", "MA"
-        fh, sh = [], []
+    # --- ЛОГИКА ---
+    def select_file(self):
+        path = filedialog.askopenfilename(filetypes=[("Touchstone Files", "*.s1p *.S1P"), ("All Files", "*.*")])
+        if path:
+            self.file_path = path
+            self.var_file.set(os.path.basename(path))
+            if self.parse_s1p(path):
+                self.autofocus() 
+            else:
+                messagebox.showerror("Ошибка", "Не удалось прочитать файл .s1p")
+
+    def parse_s1p(self, path):
         try:
-            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                for line in f:
-                    p = line.upper().strip().split()
-                    if not p or p[0].startswith("!"): continue
-                    if p[0].startswith("#"):
-                        if "HZ" in p: unit="HZ"
-                        if "KHZ" in p: unit="KHZ"
-                        if "MHZ" in p: unit="MHZ"
-                        if "GHZ" in p: unit="GHZ"
-                        if "RI" in p: fmt="RI"
-                        if "DB" in p: fmt="DB"
-                        continue
-                    try:
-                        f_val = float(p[0]) * mul.get(unit, 1)
-                        a, b = float(p[1]), float(p[2])
-                        s = complex(0,0)
-                        if fmt=="RI": s=complex(a,b)
-                        elif fmt=="DB": 
-                            mag = 10**(a/20.0)
-                            s=mag*complex(math.cos(math.radians(b)), math.sin(math.radians(b)))
-                        else: # MA
-                            s=a*complex(math.cos(math.radians(b)), math.sin(math.radians(b)))
-                        fh.append(f_val); sh.append(s)
-                    except: pass
-        except: pass
-        return fh, sh
+            with open(path, 'r') as f:
+                lines = f.readlines()
+            
+            freqs = []
+            s11_list = []
+            multiplier = 1.0
+            fmt = "RI" 
+            
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith('!'): continue
+                
+                if line.startswith('#'):
+                    parts = line.upper().split()
+                    if 'HZ' in parts: multiplier = 1.0
+                    if 'KHZ' in parts: multiplier = 1e3
+                    if 'MHZ' in parts: multiplier = 1e6
+                    if 'GHZ' in parts: multiplier = 1e9
+                    
+                    if 'RI' in parts: fmt = 'RI'
+                    elif 'MA' in parts: fmt = 'MA'
+                    elif 'DB' in parts: fmt = 'DB'
+                    continue
+                
+                try:
+                    vals = [float(x) for x in line.split()]
+                    if len(vals) < 3: continue 
+                    
+                    f_hz = vals[0] * multiplier
+                    val1, val2 = vals[1], vals[2]
+                    
+                    c_val = 0j
+                    if fmt == 'RI':
+                        c_val = complex(val1, val2)
+                    elif fmt == 'MA':
+                        rad = math.radians(val2)
+                        c_val = complex(val1 * math.cos(rad), val1 * math.sin(rad))
+                    elif fmt == 'DB':
+                        mag = 10**(val1/20.0)
+                        rad = math.radians(val2)
+                        c_val = complex(mag * math.cos(rad), mag * math.sin(rad))
+                        
+                    freqs.append(f_hz)
+                    s11_list.append(c_val)
+                except: continue
+            
+            if not freqs: return False
+            self.raw_data_freq = freqs
+            self.raw_data_s11 = s11_list
+            return True
+        except Exception as e:
+            print(f"S1P Parse Error: {e}")
+            return False
 
-    def load_s1p(self):
-        path = filedialog.askopenfilename(filetypes=[("S1P", "*.s1p"), ("All", "*.*")])
-        if not path: return
-        self.file_path = path
-        self.var_path.set(Path(path).name)
-        self.data_f_hz, self.data_s11 = self._parse_s1p(path)
-        self.build_plot(auto_scale=True)
+    def get_display_factor(self):
+        u = self.var_f_unit.get()
+        if u == "Гц": return 1.0
+        if u == "кГц": return 1e-3
+        if u == "МГц": return 1e-6
+        if u == "ГГц": return 1e-9
+        return 1.0
 
-    def _get_ys(self, mode):
+    def _parse_num(self, var):
+        try: return float(var.get().replace(",", "."))
+        except: return None
+
+    def calculate_crossings(self, xs, ys, threshold):
+        crossings = []
+        for i in range(len(ys) - 1):
+            y1, y2 = ys[i], ys[i+1]
+            if (y1 <= threshold < y2) or (y1 >= threshold > y2):
+                x1, x2 = xs[i], xs[i+1]
+                if y2 == y1: continue
+                fraction = (threshold - y1) / (y2 - y1)
+                x_cross = x1 + fraction * (x2 - x1)
+                crossings.append(x_cross)
+        return crossings
+
+    def autofocus(self):
+        if not self.raw_data_freq: return
+        
+        factor = self.get_display_factor()
+        is_vswr = "VSWR" in self.var_type.get()
+        
+        x_min = self.raw_data_freq[0] * factor
+        x_max = self.raw_data_freq[-1] * factor
+        
         ys = []
-        Z0 = 50.0
-        for s in self.data_s11:
+        for s in self.raw_data_s11:
             mag = abs(s)
-            if "VSWR" in mode: 
-                ys.append((1+mag)/(1-mag) if mag<0.999 else 100)
-            elif "lin" in mode: ys.append(mag)
-            elif "dB" in mode and "S11" in mode: ys.append(20*math.log10(max(1e-9, mag)))
-            elif "Return" in mode: ys.append(-20*math.log10(max(1e-9, mag)))
-            elif "Фаза" in mode: ys.append(math.degrees(math.atan2(s.imag, s.real)))
-            elif "Active" in mode:
-                try: z=Z0*((1+s)/(1-s)); ys.append(z.real)
-                except: ys.append(0)
-            elif "Reactive" in mode:
-                try: z=Z0*((1+s)/(1-s)); ys.append(z.imag)
-                except: ys.append(0)
-        return ys
-
-    def refresh_plot(self): self.build_plot(auto_scale=False)
-    def reset_zoom(self): self.build_plot(auto_scale=True)
-
-    def build_plot(self, auto_scale=True, x_lims=None, bandwidth_lines=None):
-        if not self.data_f_hz or not MATPLOTLIB_OK: return
-        self.ax.clear()
+            if is_vswr:
+                v = 100.0 if mag >= 0.999 else (1 + mag) / (1 - mag)
+            else:
+                v = -100.0 if mag <= 1e-9 else 20 * math.log10(mag)
+            ys.append(v)
+            
+        if ys:
+            if is_vswr:
+                min_v = min(ys)
+                thr = self._parse_num(self.var_threshold) or 2.0
+                max_v = max(3.0, thr * 2.5)
+                if min_v > max_v: max_v = min_v + 1.0
+                self.var_y_min.set("1.0")
+                self.var_y_max.set(f"{max_v:.2f}")
+                self.var_step_y.set("0.5")
+            else:
+                min_v = min(ys)
+                self.var_y_min.set(f"{min_v - 5:.1f}")
+                self.var_y_max.set("0")
+                self.var_step_y.set("5")
         
-        # Пересчет единиц
-        u = self.var_x_unit.get()
-        div = 1e9 if u=="ГГц" else (1e6 if u=="МГц" else (1e3 if u=="кГц" else 1))
+        self.var_f_start.set(f"{x_min:.4g}")
+        self.var_f_end.set(f"{x_max:.4g}")
         
-        xs = [f/div for f in self.data_f_hz]
-        mode = self.var_quantity.get()
-        ys = self._get_ys(mode)
-        
-        self.ax.plot(xs, ys, label="Data", linewidth=1.5, color="#0056b3")
-        self.ax.set_xlabel(f"Частота ({u})", fontsize=9, fontweight='bold')
-        self.ax.set_ylabel(mode, fontsize=9, fontweight='bold')
-        self.ax.grid(self.var_show_grid.get())
+        span = x_max - x_min
+        step_x = span / 10.0
+        if step_x > 100: step_x = round(step_x / 50) * 50
+        elif step_x > 10: step_x = round(step_x / 5) * 5
+        else: step_x = round(step_x, 1) or 1
+        self.var_step_x.set(f"{step_x}")
 
-        # Порог
+        self.update_plot()
+
+    def update_plot(self):
+        if not MATPLOTLIB_OK or not self.ax: return
+        if not self.raw_data_freq: return
+        
         try:
-            thr = float(self.var_threshold.get().replace(",", "."))
-            if "VSWR" in mode: self.ax.axhline(thr, color='red', linestyle='--')
-        except: pass
+            self.ax.clear()
+            self._markers_list = []
+            
+            factor = self.get_display_factor()
+            xs = [f * factor for f in self.raw_data_freq]
+            ys = []
+            
+            mode = self.var_type.get()
+            is_vswr = "VSWR" in mode
+            
+            for s in self.raw_data_s11:
+                mag = abs(s)
+                if is_vswr:
+                    v = 100.0 if mag >= 0.999 else (1 + mag) / (1 - mag)
+                else:
+                    v = -100.0 if mag <= 1e-9 else 20 * math.log10(mag)
+                ys.append(v)
 
-        if x_lims: self.ax.set_xlim(x_lims)
-        elif auto_scale and xs:
-            span = max(xs)-min(xs)
-            m = span*0.05 if span>0 else 1
-            self.ax.set_xlim(min(xs)-m, max(xs)+m)
+            # Основная линия
+            self.ax.plot(xs, ys, label=mode, linewidth=2, color="#0056b3")
+            
+            # Порог и маркеры частот
+            thr = self._parse_num(self.var_threshold)
+            if thr is not None:
+                self.ax.axhline(thr, color='red', linestyle='--', linewidth=1.5, label=f"Порог {thr}")
+                
+                crossings = self.calculate_crossings(xs, ys, thr)
+                trans = self.ax.get_xaxis_transform() # Трансформация для привязки к оси X
+                
+                for x_cr in crossings:
+                    self.ax.axvline(x_cr, color='gray', linestyle=':', linewidth=1)
+                    # Подпись частоты снизу, но ВНУТРИ графика (чуть выше оси X)
+                    # y=0.02 в координатах оси (где 0 - низ графика, 1 - верх)
+                    self.ax.text(x_cr, 0.02, f"{x_cr:.1f}", transform=trans,
+                                 rotation=90, verticalalignment='bottom', horizontalalignment='right',
+                                 fontsize=8, color='#333',
+                                 bbox=dict(boxstyle="square,pad=0", fc="white", alpha=0.6, ec="none"))
 
-        # Линии полосы
-        if bandwidth_lines:
-            f1, f2 = bandwidth_lines
-            # Делим f1, f2 на div, так как они в Гц
-            self.ax.axvline(f1/div, color='black', linestyle='--')
-            self.ax.axvline(f2/div, color='black', linestyle='--')
+            # Лимиты
+            x_start = self._parse_num(self.var_f_start)
+            x_end = self._parse_num(self.var_f_end)
+            y_min = self._parse_num(self.var_y_min)
+            y_max = self._parse_num(self.var_y_max)
+            
+            if x_start is not None and x_end is not None: self.ax.set_xlim(x_start, x_end)
+            if y_min is not None and y_max is not None: self.ax.set_ylim(y_min, y_max)
+                
+            # Сетка
+            self.ax.grid(True, which='major', alpha=0.7)
+            self.ax.grid(True, which='minor', alpha=0.3, linestyle=':')
+            self.ax.minorticks_on()
+            
+            sx = self._parse_num(self.var_step_x)
+            sy = self._parse_num(self.var_step_y)
+            if sx and sx > 0: self.ax.xaxis.set_major_locator(MultipleLocator(sx))
+            if sy and sy > 0: self.ax.yaxis.set_major_locator(MultipleLocator(sy))
+            
             # Подписи
-            trans = self.ax.get_xaxis_transform()
-            self.ax.text(f1/div, -0.05, f"{f1/div:.2f}", transform=trans, ha='center', va='top', fontsize=9, backgroundcolor='white')
-            self.ax.text(f2/div, -0.05, f"{f2/div:.2f}", transform=trans, ha='center', va='top', fontsize=9, backgroundcolor='white')
-
-        for mx, mt in self._markers:
-            self.ax.axvline(mx, color='green', linestyle=':')
-            if len(xs)>1:
-                idx = min(range(len(xs)), key=lambda i: abs(xs[i]-mx))
-                self.ax.annotate(mt, xy=(mx, ys[idx]), xytext=(5,5), textcoords="offset points", bbox=dict(boxstyle="round", fc="white"))
-        
-        self.canvas.draw()
-
-    def auto_focus(self):
-        # Старая добрая логика: ищем точки, берем min/max, зумим
-        if not self.data_f_hz: return
-        try:
-            thr = float(self.var_threshold.get().replace(",", "."))
-            mode = self.var_quantity.get()
-            ys = self._get_ys(mode)
+            u_str = self.var_f_unit.get()
+            self.ax.set_xlabel(f"Частота, {u_str}", fontsize=10)
+            self.ax.set_ylabel("КСВН, отн. ед." if is_vswr else "S11, дБ", fontsize=10)
+            self.ax.set_title(f"График {mode}", fontsize=11)
             
-            u = self.var_x_unit.get()
-            div = 1e9 if u=="ГГц" else (1e6 if u=="МГц" else (1e3 if u=="кГц" else 1))
+            self.fig.tight_layout()
+            self.canvas.draw()
             
-            # Работаем в Гц для поиска
-            xs_hz = self.data_f_hz
-
-            # Условие: КСВН < порога
-            is_good = lambda y: y <= thr if "VSWR" in mode else (y >= thr if "Return" in mode else y <= thr)
-            
-            good_idxs = [i for i, y in enumerate(ys) if is_good(y)]
-            if not good_idxs:
-                messagebox.showinfo("Инфо", f"Нет точек, удовлетворяющих условию {thr}")
-                return
-            
-            # Берем просто минимум и максимум из хороших точек (в Гц)
-            f_start_hz = xs_hz[min(good_idxs)]
-            f_end_hz = xs_hz[max(good_idxs)]
-            
-            # Переводим в текущие единицы для графика
-            f_start = f_start_hz / div
-            f_end = f_end_hz / div
-            
-            bw = f_end - f_start
-            m = bw*0.1 if bw>0 else (f_end)*0.05
-            
-            # Вызываем с линиями (передаем Гц, build_plot сам поделит)
-            self.build_plot(auto_scale=False, x_lims=(f_start-m, f_end+m), bandwidth_lines=(f_start_hz, f_end_hz))
-            
-        except Exception as e: messagebox.showerror("Err", str(e))
+        except Exception as e:
+            print(f"Plot Error: {e}")
 
     def on_click(self, event):
-        if not self.var_cursor_mode.get(): return
-        if event.button==1 and event.xdata:
-            self._markers.append((event.xdata, f"{event.xdata:.2f}"))
-            self.refresh_plot()
-        elif event.button==3 and self._markers:
-            self._markers.pop(); self.refresh_plot()
+        if not self.var_markers.get(): return
+        if event.inaxes != self.ax: return
+        
+        if event.button == 1: 
+            x, y = event.xdata, event.ydata
+            pt, = self.ax.plot(x, y, 'ro', markersize=5, zorder=10)
+            txt = self.ax.annotate(
+                f"{x:.1f}; {y:.2f}", xy=(x, y), xytext=(10, 10), 
+                textcoords='offset points', fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.3", fc="#ffffe0", alpha=0.9, ec="black"),
+                arrowprops=dict(arrowstyle="->", connectionstyle="arc3")
+            )
+            self._markers_list.append((pt, txt))
+            self.canvas.draw()
             
-    def clear_markers(self): self._markers=[]; self.refresh_plot()
-    def open_detached(self): pass # (как раньше)
-    def save_plot(self): pass
-    def save_project(self): pass
-    def load_project(self): pass
+        elif event.button == 3:
+            if self._markers_list:
+                pt, txt = self._markers_list.pop()
+                pt.remove(); txt.remove()
+                self.canvas.draw()
+
+    def clear_markers(self):
+        for pt, txt in self._markers_list:
+            pt.remove()
+            txt.remove()
+        self._markers_list = []
+        self.canvas.draw()
