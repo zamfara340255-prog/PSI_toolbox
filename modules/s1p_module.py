@@ -3,8 +3,7 @@ import math
 import os
 import tkinter as tk
 import tkinter.ttk as ttk
-from tkinter import filedialog, messagebox
-
+from tkinter import filedialog, messagebox, simpledialog  # Добавили simpledialog
 from core.utils import tb, MATPLOTLIB_OK
 from core.base_module import CalcModule
 
@@ -17,60 +16,32 @@ class S1PVSWRModule(CalcModule):
     key = "s1p"
     title = "Анализ согласования (S1P)"
 
-    # --- ХРАНИЛИЩЕ СОСТОЯНИЯ (Чтобы данные не исчезали при переключении) ---
-    _saved_state = {} 
-
     def __init__(self, app):
         super().__init__(app)
+        # --- Переменные данных ---
+        self.file_path = ""
+        self.raw_data_freq = [] 
+        self.raw_data_s11 = []  
         
-        # --- Восстанавливаем данные или ставим дефолт ---
-        state = self._saved_state.get(self.key, {})
+        # --- UI Переменные ---
+        self.var_file = tk.StringVar(value="Файл не выбран")
+        self.var_type = tk.StringVar(value="КСВН (VSWR)")
+        self.var_f_unit = tk.StringVar(value="МГц")
+        self.var_threshold = tk.StringVar(value="2.0")
         
-        self.file_path = state.get('file_path', "")
-        self.raw_data_freq = state.get('freqs', [])
-        self.raw_data_s11 = state.get('s11', [])
+        # Настройки осей
+        self.var_f_start = tk.StringVar()
+        self.var_f_end = tk.StringVar()
+        self.var_step_x = tk.StringVar(value="100") 
         
-        # Инициализация переменных UI значениями из памяти
-        self.var_file = tk.StringVar(value=state.get('var_file', "Файл не выбран"))
-        self.var_type = tk.StringVar(value=state.get('var_type', "КСВН (VSWR)"))
-        self.var_f_unit = tk.StringVar(value=state.get('var_f_unit', "МГц"))
-        self.var_threshold = tk.StringVar(value=state.get('var_threshold', "2.0"))
-        
-        self.var_f_start = tk.StringVar(value=state.get('var_f_start', ""))
-        self.var_f_end = tk.StringVar(value=state.get('var_f_end', ""))
-        self.var_step_x = tk.StringVar(value=state.get('var_step_x', "100"))
-        
-        self.var_y_min = tk.StringVar(value=state.get('var_y_min', "1.0"))
-        self.var_y_max = tk.StringVar(value=state.get('var_y_max', "5.0"))
-        self.var_step_y = tk.StringVar(value=state.get('var_step_y', "0.5"))
+        self.var_y_min = tk.StringVar(value="1.0")
+        self.var_y_max = tk.StringVar(value="5.0")
+        self.var_step_y = tk.StringVar(value="0.5")   
 
-        self.var_markers = tk.BooleanVar(value=state.get('var_markers', True))
+        self.var_markers = tk.BooleanVar(value=True)
 
         self.fig, self.ax, self.canvas = None, None, None
         self._markers_list = []
-
-        # Если данные уже были, запланируем отрисовку сразу после создания окна
-        if self.raw_data_freq:
-            self.app.root.after(100, self.update_plot)
-
-    def _save_current_state(self):
-        """Сохраняет текущие переменные в статический словарь класса"""
-        self._saved_state[self.key] = {
-            'file_path': self.file_path,
-            'freqs': self.raw_data_freq,
-            's11': self.raw_data_s11,
-            'var_file': self.var_file.get(),
-            'var_type': self.var_type.get(),
-            'var_f_unit': self.var_f_unit.get(),
-            'var_threshold': self.var_threshold.get(),
-            'var_f_start': self.var_f_start.get(),
-            'var_f_end': self.var_f_end.get(),
-            'var_step_x': self.var_step_x.get(),
-            'var_y_min': self.var_y_min.get(),
-            'var_y_max': self.var_y_max.get(),
-            'var_step_y': self.var_step_y.get(),
-            'var_markers': self.var_markers.get()
-        }
 
     def toolbar_actions(self):
         return []
@@ -131,6 +102,7 @@ class S1PVSWRModule(CalcModule):
         
         btn_frame = tb.Frame(ac)
         btn_frame.pack(fill="x", pady=(10, 0))
+        
         tb.Button(btn_frame, text="Автомасштаб", command=self.autofocus, bootstyle="info").pack(fill="x", pady=2)
         tb.Button(btn_frame, text="Обновить график", command=self.update_plot, bootstyle="success").pack(fill="x", pady=2)
         tb.Button(btn_frame, text="Очистить маркеры", command=self.clear_markers, bootstyle="danger-outline").pack(fill="x", pady=2)
@@ -162,6 +134,10 @@ class S1PVSWRModule(CalcModule):
             else:
                 messagebox.showerror("Ошибка", "Не удалось прочитать файл .s1p")
         self._save_current_state()
+
+    def _save_current_state(self):
+        # Метод оставлен пустым, так как main.py теперь хранит состояние
+        pass
 
     def parse_s1p(self, path):
         try:
@@ -211,7 +187,6 @@ class S1PVSWRModule(CalcModule):
             if not freqs: return False
             self.raw_data_freq = freqs
             self.raw_data_s11 = s11_list
-            self._save_current_state()
             return True
         except Exception as e:
             print(f"S1P Parse Error: {e}")
@@ -286,9 +261,6 @@ class S1PVSWRModule(CalcModule):
         self.update_plot()
 
     def update_plot(self):
-        # При каждом обновлении сохраняем состояние
-        self._save_current_state()
-
         if not MATPLOTLIB_OK or not self.ax: return
         if not self.raw_data_freq: return
         
@@ -311,18 +283,15 @@ class S1PVSWRModule(CalcModule):
                     v = -100.0 if mag <= 1e-9 else 20 * math.log10(mag)
                 ys.append(v)
 
-            # Получаем границы графика ИЗ ПОЛЕЙ ВВОДА или из данных
+            # Получаем границы вида (View Limits)
             x_start_val = self._parse_num(self.var_f_start)
             x_end_val = self._parse_num(self.var_f_end)
             
-            # Если поля пусты, берем авто-границы
             view_min = x_start_val if x_start_val is not None else min(xs)
             view_max = x_end_val if x_end_val is not None else max(xs)
 
-            # Отрисовка основной линии
             self.ax.plot(xs, ys, label=mode, linewidth=2, color="#0056b3")
             
-            # --- ЛОГИКА ОТРИСОВКИ ЛИНИЙ СРЕЗА ---
             thr = self._parse_num(self.var_threshold)
             if thr is not None:
                 self.ax.axhline(thr, color='red', linestyle='--', linewidth=1.5, label=f"Порог {thr}")
@@ -331,16 +300,13 @@ class S1PVSWRModule(CalcModule):
                 trans = self.ax.get_xaxis_transform()
                 
                 for x_cr in crossings:
-                    # ИСПРАВЛЕНИЕ БАГА: Рисуем линию ТОЛЬКО если она внутри текущего вида
                     if view_min <= x_cr <= view_max:
                         self.ax.axvline(x_cr, color='gray', linestyle=':', linewidth=1)
-                        # Подпись
                         self.ax.text(x_cr, 0.02, f"{x_cr:.1f}", transform=trans,
                                      rotation=90, verticalalignment='bottom', horizontalalignment='right',
                                      fontsize=8, color='#333',
                                      bbox=dict(boxstyle="square,pad=0", fc="white", alpha=0.6, ec="none"))
 
-            # Применяем лимиты к осям
             if x_start_val is not None and x_end_val is not None: 
                 self.ax.set_xlim(x_start_val, x_end_val)
             
@@ -349,7 +315,6 @@ class S1PVSWRModule(CalcModule):
             if y_min is not None and y_max is not None: 
                 self.ax.set_ylim(y_min, y_max)
                 
-            # Сетка
             self.ax.grid(True, which='major', alpha=0.7)
             self.ax.grid(True, which='minor', alpha=0.3, linestyle=':')
             self.ax.minorticks_on()
@@ -359,7 +324,6 @@ class S1PVSWRModule(CalcModule):
             if sx and sx > 0: self.ax.xaxis.set_major_locator(MultipleLocator(sx))
             if sy and sy > 0: self.ax.yaxis.set_major_locator(MultipleLocator(sy))
             
-            # Подписи
             u_str = self.var_f_unit.get()
             self.ax.set_xlabel(f"Частота, {u_str}", fontsize=10)
             self.ax.set_ylabel("КСВН, отн. ед." if is_vswr else "S11, дБ", fontsize=10)
@@ -372,6 +336,33 @@ class S1PVSWRModule(CalcModule):
             print(f"Plot Error: {e}")
 
     def on_click(self, event):
+        # 1. ОБРАБОТКА ДВОЙНОГО ЩЕЛЧКА (ПЕРЕИМЕНОВАНИЕ)
+        if event.dblclick:
+            clicked_obj = None
+            name_obj = ""
+            
+            # Проверка клика по заголовку или осям
+            if self.ax.title.contains(event)[0]:
+                clicked_obj = self.ax.title
+                name_obj = "заголовка графика"
+            elif self.ax.xaxis.label.contains(event)[0]:
+                clicked_obj = self.ax.xaxis.label
+                name_obj = "подписи оси X"
+            elif self.ax.yaxis.label.contains(event)[0]:
+                clicked_obj = self.ax.yaxis.label
+                name_obj = "подписи оси Y"
+                
+            if clicked_obj:
+                new_text = simpledialog.askstring("Переименование", 
+                                                  f"Введите новый текст для {name_obj}:", 
+                                                  initialvalue=clicked_obj.get_text(),
+                                                  parent=self.frame)
+                if new_text is not None:
+                    clicked_obj.set_text(new_text)
+                    self.canvas.draw()
+            return
+
+        # 2. ОБРАБОТКА МАРКЕРОВ
         if not self.var_markers.get(): return
         if event.inaxes != self.ax: return
         
