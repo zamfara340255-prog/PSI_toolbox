@@ -15,37 +15,64 @@ if MATPLOTLIB_OK:
 
 class S1PVSWRModule(CalcModule):
     key = "s1p"
-    title = "Анализ согласования (S1P)"  # Научное название
+    title = "Анализ согласования (S1P)"
+
+    # --- ХРАНИЛИЩЕ СОСТОЯНИЯ (Чтобы данные не исчезали при переключении) ---
+    _saved_state = {} 
 
     def __init__(self, app):
         super().__init__(app)
-        # --- Переменные данных ---
-        self.file_path = ""
-        self.raw_data_freq = [] 
-        self.raw_data_s11 = []  
         
-        # --- UI Переменные ---
-        self.var_file = tk.StringVar(value="Файл не выбран")
-        self.var_type = tk.StringVar(value="КСВН (VSWR)")
-        self.var_f_unit = tk.StringVar(value="МГц")
-        self.var_threshold = tk.StringVar(value="2.0")
+        # --- Восстанавливаем данные или ставим дефолт ---
+        state = self._saved_state.get(self.key, {})
         
-        # Настройки осей
-        self.var_f_start = tk.StringVar()
-        self.var_f_end = tk.StringVar()
-        self.var_step_x = tk.StringVar(value="100") 
+        self.file_path = state.get('file_path', "")
+        self.raw_data_freq = state.get('freqs', [])
+        self.raw_data_s11 = state.get('s11', [])
         
-        self.var_y_min = tk.StringVar(value="1.0")
-        self.var_y_max = tk.StringVar(value="5.0")
-        self.var_step_y = tk.StringVar(value="0.5")   
+        # Инициализация переменных UI значениями из памяти
+        self.var_file = tk.StringVar(value=state.get('var_file', "Файл не выбран"))
+        self.var_type = tk.StringVar(value=state.get('var_type', "КСВН (VSWR)"))
+        self.var_f_unit = tk.StringVar(value=state.get('var_f_unit', "МГц"))
+        self.var_threshold = tk.StringVar(value=state.get('var_threshold', "2.0"))
+        
+        self.var_f_start = tk.StringVar(value=state.get('var_f_start', ""))
+        self.var_f_end = tk.StringVar(value=state.get('var_f_end', ""))
+        self.var_step_x = tk.StringVar(value=state.get('var_step_x', "100"))
+        
+        self.var_y_min = tk.StringVar(value=state.get('var_y_min', "1.0"))
+        self.var_y_max = tk.StringVar(value=state.get('var_y_max', "5.0"))
+        self.var_step_y = tk.StringVar(value=state.get('var_step_y', "0.5"))
 
-        self.var_markers = tk.BooleanVar(value=True)
+        self.var_markers = tk.BooleanVar(value=state.get('var_markers', True))
 
         self.fig, self.ax, self.canvas = None, None, None
         self._markers_list = []
 
+        # Если данные уже были, запланируем отрисовку сразу после создания окна
+        if self.raw_data_freq:
+            self.app.root.after(100, self.update_plot)
+
+    def _save_current_state(self):
+        """Сохраняет текущие переменные в статический словарь класса"""
+        self._saved_state[self.key] = {
+            'file_path': self.file_path,
+            'freqs': self.raw_data_freq,
+            's11': self.raw_data_s11,
+            'var_file': self.var_file.get(),
+            'var_type': self.var_type.get(),
+            'var_f_unit': self.var_f_unit.get(),
+            'var_threshold': self.var_threshold.get(),
+            'var_f_start': self.var_f_start.get(),
+            'var_f_end': self.var_f_end.get(),
+            'var_step_x': self.var_step_x.get(),
+            'var_y_min': self.var_y_min.get(),
+            'var_y_max': self.var_y_max.get(),
+            'var_step_y': self.var_step_y.get(),
+            'var_markers': self.var_markers.get()
+        }
+
     def toolbar_actions(self):
-        # Кнопку убрали, так как есть "Обзор" в боковой панели
         return []
 
     def build_ui(self, parent):
@@ -61,14 +88,13 @@ class S1PVSWRModule(CalcModule):
         paned.add(left, weight=0) 
         paned.add(right, weight=1) 
 
-        # --- ЛЕВАЯ ПАНЕЛЬ: ИСТОЧНИК ---
+        # --- ЛЕВАЯ ПАНЕЛЬ ---
         lc = tb.Labelframe(left, text="Источник данных", padding=pad)
         lc.pack(fill="x", pady=(0, pad))
         
         tb.Label(lc, textvariable=self.var_file, bootstyle="secondary", wraplength=200).pack(fill="x", pady=(0, 5))
         tb.Button(lc, text="Обзор...", command=self.select_file, bootstyle="secondary-outline").pack(fill="x")
 
-        # --- ЛЕВАЯ ПАНЕЛЬ: ПАРАМЕТРЫ ---
         pc = tb.Labelframe(left, text="Параметры", padding=pad)
         pc.pack(fill="x", pady=(0, pad))
         
@@ -84,7 +110,6 @@ class S1PVSWRModule(CalcModule):
         tb.Label(pc, text="Порог (VSWR):", font=("Segoe UI", 9)).pack(anchor="w", pady=(5,0))
         tb.Entry(pc, textvariable=self.var_threshold).pack(fill="x", pady=(0,5))
 
-        # --- ЛЕВАЯ ПАНЕЛЬ: УПРАВЛЕНИЕ ГРАФИКОМ ---
         ac = tb.Labelframe(left, text="Управление графиком", padding=pad)
         ac.pack(fill="x", pady=(0, pad))
         
@@ -104,36 +129,29 @@ class S1PVSWRModule(CalcModule):
 
         tb.Checkbutton(ac, text="Маркеры (ЛКМ)", variable=self.var_markers).pack(anchor="w", pady=(10, 5))
         
-        # Кнопки действий
         btn_frame = tb.Frame(ac)
         btn_frame.pack(fill="x", pady=(10, 0))
-        
         tb.Button(btn_frame, text="Автомасштаб", command=self.autofocus, bootstyle="info").pack(fill="x", pady=2)
         tb.Button(btn_frame, text="Обновить график", command=self.update_plot, bootstyle="success").pack(fill="x", pady=2)
         tb.Button(btn_frame, text="Очистить маркеры", command=self.clear_markers, bootstyle="danger-outline").pack(fill="x", pady=2)
 
-        # --- ПРАВАЯ ПАНЕЛЬ: ГРАФИК ---
+        # --- ПРАВАЯ ПАНЕЛЬ ---
         plot_cont = tb.Frame(right)
         plot_cont.pack(fill="both", expand=True)
 
         if MATPLOTLIB_OK:
             self.fig = Figure(dpi=100)
             self.ax = self.fig.add_subplot(111)
-            # Убираем ручной adjust, полагаемся на tight_layout в конце
-            
             self.canvas = FigureCanvasTkAgg(self.fig, master=plot_cont)
             self.canvas.get_tk_widget().pack(fill="both", expand=True)
-            
             self.toolbar = NavigationToolbar2Tk(self.canvas, plot_cont)
             self.toolbar.update()
-            
             self.canvas.mpl_connect("button_press_event", self.on_click)
         else:
             tb.Label(plot_cont, text="Matplotlib не установлен").pack()
 
         return self.frame
 
-    # --- ЛОГИКА ---
     def select_file(self):
         path = filedialog.askopenfilename(filetypes=[("Touchstone Files", "*.s1p *.S1P"), ("All Files", "*.*")])
         if path:
@@ -143,16 +161,15 @@ class S1PVSWRModule(CalcModule):
                 self.autofocus() 
             else:
                 messagebox.showerror("Ошибка", "Не удалось прочитать файл .s1p")
+        self._save_current_state()
 
     def parse_s1p(self, path):
         try:
             with open(path, 'r') as f:
                 lines = f.readlines()
             
-            freqs = []
-            s11_list = []
-            multiplier = 1.0
-            fmt = "RI" 
+            freqs, s11_list = [], []
+            multiplier, fmt = 1.0, "RI"
             
             for line in lines:
                 line = line.strip()
@@ -178,8 +195,7 @@ class S1PVSWRModule(CalcModule):
                     val1, val2 = vals[1], vals[2]
                     
                     c_val = 0j
-                    if fmt == 'RI':
-                        c_val = complex(val1, val2)
+                    if fmt == 'RI': c_val = complex(val1, val2)
                     elif fmt == 'MA':
                         rad = math.radians(val2)
                         c_val = complex(val1 * math.cos(rad), val1 * math.sin(rad))
@@ -195,6 +211,7 @@ class S1PVSWRModule(CalcModule):
             if not freqs: return False
             self.raw_data_freq = freqs
             self.raw_data_s11 = s11_list
+            self._save_current_state()
             return True
         except Exception as e:
             print(f"S1P Parse Error: {e}")
@@ -226,7 +243,6 @@ class S1PVSWRModule(CalcModule):
 
     def autofocus(self):
         if not self.raw_data_freq: return
-        
         factor = self.get_display_factor()
         is_vswr = "VSWR" in self.var_type.get()
         
@@ -270,6 +286,9 @@ class S1PVSWRModule(CalcModule):
         self.update_plot()
 
     def update_plot(self):
+        # При каждом обновлении сохраняем состояние
+        self._save_current_state()
+
         if not MATPLOTLIB_OK or not self.ax: return
         if not self.raw_data_freq: return
         
@@ -292,34 +311,43 @@ class S1PVSWRModule(CalcModule):
                     v = -100.0 if mag <= 1e-9 else 20 * math.log10(mag)
                 ys.append(v)
 
-            # Основная линия
+            # Получаем границы графика ИЗ ПОЛЕЙ ВВОДА или из данных
+            x_start_val = self._parse_num(self.var_f_start)
+            x_end_val = self._parse_num(self.var_f_end)
+            
+            # Если поля пусты, берем авто-границы
+            view_min = x_start_val if x_start_val is not None else min(xs)
+            view_max = x_end_val if x_end_val is not None else max(xs)
+
+            # Отрисовка основной линии
             self.ax.plot(xs, ys, label=mode, linewidth=2, color="#0056b3")
             
-            # Порог и маркеры частот
+            # --- ЛОГИКА ОТРИСОВКИ ЛИНИЙ СРЕЗА ---
             thr = self._parse_num(self.var_threshold)
             if thr is not None:
                 self.ax.axhline(thr, color='red', linestyle='--', linewidth=1.5, label=f"Порог {thr}")
                 
                 crossings = self.calculate_crossings(xs, ys, thr)
-                trans = self.ax.get_xaxis_transform() # Трансформация для привязки к оси X
+                trans = self.ax.get_xaxis_transform()
                 
                 for x_cr in crossings:
-                    self.ax.axvline(x_cr, color='gray', linestyle=':', linewidth=1)
-                    # Подпись частоты снизу, но ВНУТРИ графика (чуть выше оси X)
-                    # y=0.02 в координатах оси (где 0 - низ графика, 1 - верх)
-                    self.ax.text(x_cr, 0.02, f"{x_cr:.1f}", transform=trans,
-                                 rotation=90, verticalalignment='bottom', horizontalalignment='right',
-                                 fontsize=8, color='#333',
-                                 bbox=dict(boxstyle="square,pad=0", fc="white", alpha=0.6, ec="none"))
+                    # ИСПРАВЛЕНИЕ БАГА: Рисуем линию ТОЛЬКО если она внутри текущего вида
+                    if view_min <= x_cr <= view_max:
+                        self.ax.axvline(x_cr, color='gray', linestyle=':', linewidth=1)
+                        # Подпись
+                        self.ax.text(x_cr, 0.02, f"{x_cr:.1f}", transform=trans,
+                                     rotation=90, verticalalignment='bottom', horizontalalignment='right',
+                                     fontsize=8, color='#333',
+                                     bbox=dict(boxstyle="square,pad=0", fc="white", alpha=0.6, ec="none"))
 
-            # Лимиты
-            x_start = self._parse_num(self.var_f_start)
-            x_end = self._parse_num(self.var_f_end)
+            # Применяем лимиты к осям
+            if x_start_val is not None and x_end_val is not None: 
+                self.ax.set_xlim(x_start_val, x_end_val)
+            
             y_min = self._parse_num(self.var_y_min)
             y_max = self._parse_num(self.var_y_max)
-            
-            if x_start is not None and x_end is not None: self.ax.set_xlim(x_start, x_end)
-            if y_min is not None and y_max is not None: self.ax.set_ylim(y_min, y_max)
+            if y_min is not None and y_max is not None: 
+                self.ax.set_ylim(y_min, y_max)
                 
             # Сетка
             self.ax.grid(True, which='major', alpha=0.7)
